@@ -113,13 +113,15 @@ async function loadInfo() {
 // is fetched again before any of it is passed on), so the page never keeps several copies of the client in
 // memory: phones (iPhone Safari above all) close tabs that use too much. Progress covers all parts of all files.
 const partProgress = { total: 0, done: 0 };
+// the published client's version (stream publish): cached files of an older version are never used
+const versioned = (url) => info && info.version && !url.startsWith("blob:") ? url + (url.includes("?") ? "&" : "?") + "v=" + info.version : url;
 async function fetchPart(url) {
   // a dropped connection (mobile data, flaky networks) retries the part, up to 5 times
   for (let attempt = 1; ; attempt++) {
     const got = [];
     let n = 0;
     try {
-      const r = await fetch(url, { cache: attempt > 1 ? "reload" : "default" });
+      const r = await fetch(versioned(url), { cache: attempt > 1 ? "reload" : "default" });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const reader = r.body.getReader();
       for (;;) {
@@ -255,7 +257,7 @@ async function startClient() {
     // static hosting: file paths are relative to the game's folder; large files come in parts
     const rel = (x) => typeof x === "string" ? info.base + x : x;
     partProgress.total = ["data", "code", "framework"].reduce((n, k) => n + (typeof files[k] === "object" ? files[k].size : 0), 0);
-    files = { loader: rel(files.loader), framework: rel(files.framework),
+    files = { loader: versioned(rel(files.loader)), framework: versioned(rel(files.framework)),
               code: await joinedUrl(rel(files.code), "application/wasm"), data: await joinedUrl(rel(files.data), "application/octet-stream") };
   }
   await loadScript(files.loader);

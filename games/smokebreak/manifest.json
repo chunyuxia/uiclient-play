@@ -55,5 +55,6 @@
     "stun:stun.cloudflare.com:3478"
    ]
   }
- ]
+ ],
+ "version": "98e8cfc330"
 }

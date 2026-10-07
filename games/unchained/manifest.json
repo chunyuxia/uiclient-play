@@ -59,5 +59,6 @@
     "stun:stun.cloudflare.com:3478"
    ]
   }
- ]
+ ],
+ "version": "0c7d655cd7"
 }

@@ -38,5 +38,6 @@
     "stun:stun.cloudflare.com:3478"
    ]
   }
- ]
+ ],
+ "version": "2201213eab"
 }
