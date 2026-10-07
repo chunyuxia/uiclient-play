@@ -38,7 +38,7 @@
     "Build/ui-client-web-mobile.data.part03",
     "Build/ui-client-web-mobile.data.part04"
    ],
-   "size": 211441516,
+   "size": 211442229,
    "gzip": true
   }
  },
@@ -56,5 +56,5 @@
    ]
   }
  ],
- "version": "98e8cfc330"
+ "version": "ea2e03362b"
 }

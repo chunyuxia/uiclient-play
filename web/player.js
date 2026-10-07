@@ -448,6 +448,11 @@ onVideoFrame((f) => {
 // through the page's own server). The data channels are new each time; input and frame watching are bound once.
 async function connectOnce() {
   const pc = new RTCPeerConnection({ iceServers: (info && info.ice) || [] });
+  try { return await connectWith(pc); }
+  catch (e) { try { pc.close(); } catch (_) { /* already closed */ } throw e; }   // browsers limit open connections
+}
+
+async function connectWith(pc) {
   pc.addTransceiver("video", { direction: "recvonly" });
   if (params.get("input") !== "0") setupInput(pc.createDataChannel("input", { ordered: true }));
   if (params.get("ui") !== "0") {
