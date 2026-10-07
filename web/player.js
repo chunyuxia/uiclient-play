@@ -115,15 +115,30 @@ async function joinedUrl(entry, type) {
   if (typeof entry === "string") return entry;
   const chunks = [];
   for (const part of entry.parts) {
-    const r = await fetch(info.base + part);
-    if (!r.ok) throw new Error(part + ": HTTP " + r.status);
-    const reader = r.body.getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value);
-      partProgress.done += value.length;
-      setStatus("Downloading the game client: " + Math.round(100 * partProgress.done / Math.max(1, partProgress.total)) + "%");
+    // a dropped connection (mobile data, flaky networks) retries the part, up to 5 times
+    for (let attempt = 1; ; attempt++) {
+      const got = [];
+      let n = 0;
+      try {
+        const r = await fetch(info.base + part, { cache: attempt > 1 ? "reload" : "default" });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const reader = r.body.getReader();
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          got.push(value);
+          n += value.length;
+          setStatus("Downloading the game client: " + Math.round(100 * (partProgress.done + n) / Math.max(1, partProgress.total)) + "%");
+        }
+        chunks.push(...got);
+        partProgress.done += n;
+        break;
+      } catch (e) {
+        report("download-retry", { part, attempt, error: String(e && e.message || e).slice(0, 200) });
+        if (attempt >= 5) throw new Error(part + ": " + (e && e.message || e));
+        setStatus("Download interrupted; retrying (" + attempt + ")...");
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
+      }
     }
   }
   let blob = new Blob(chunks);
