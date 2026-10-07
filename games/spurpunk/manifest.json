@@ -1,0 +1,42 @@
+{
+ "game": "spurpunk",
+ "product": "Spurpunk TD",
+ "width": 1280,
+ "height": 720,
+ "band": 16,
+ "touch": null,
+ "client": {
+  "loader": "Build/ui-client-web-mobile.loader.js",
+  "framework": "Build/ui-client-web-mobile.framework.js",
+  "code": {
+   "parts": [
+    "Build/ui-client-web-mobile.wasm.part00"
+   ],
+   "size": 12538279,
+   "gzip": true
+  },
+  "data": {
+   "parts": [
+    "Build/ui-client-web-mobile.data.part00",
+    "Build/ui-client-web-mobile.data.part01",
+    "Build/ui-client-web-mobile.data.part02"
+   ],
+   "size": 119231649,
+   "gzip": true
+  }
+ },
+ "clientBuild": "mobile",
+ "signal": "wss://unity-signaling-server.onrender.com",
+ "ice": [
+  {
+   "urls": [
+    "stun:stun.l.google.com:19302"
+   ]
+  },
+  {
+   "urls": [
+    "stun:stun.cloudflare.com:3478"
+   ]
+  }
+ ]
+}

@@ -1,0 +1,63 @@
+{
+ "game": "unchained",
+ "product": "Unchained",
+ "width": 1280,
+ "height": 720,
+ "band": 16,
+ "touch": {
+  "pad": [
+   "KeyW",
+   "KeyA",
+   "KeyS",
+   "KeyD"
+  ],
+  "keys": [
+   {
+    "label": "Next",
+    "code": "Space"
+   },
+   {
+    "label": "Esc",
+    "code": "Escape"
+   }
+  ]
+ },
+ "client": {
+  "loader": "Build/ui-client-web-mobile.loader.js",
+  "framework": "Build/ui-client-web-mobile.framework.js",
+  "code": {
+   "parts": [
+    "Build/ui-client-web-mobile.wasm.part00"
+   ],
+   "size": 17031454,
+   "gzip": true
+  },
+  "data": {
+   "parts": [
+    "Build/ui-client-web-mobile.data.part00",
+    "Build/ui-client-web-mobile.data.part01",
+    "Build/ui-client-web-mobile.data.part02",
+    "Build/ui-client-web-mobile.data.part03",
+    "Build/ui-client-web-mobile.data.part04",
+    "Build/ui-client-web-mobile.data.part05",
+    "Build/ui-client-web-mobile.data.part06"
+   ],
+   "size": 290424840,
+   "gzip": true
+  }
+ },
+ "clientBuild": "mobile",
+ "signal": "wss://unity-signaling-server.onrender.com",
+ "ice": [
+  {
+   "urls": [
+    "stun:stun.l.google.com:19302"
+   ]
+  },
+  {
+   "urls": [
+    "stun:stun.cloudflare.com:3478"
+   ]
+  }
+ ]
+}

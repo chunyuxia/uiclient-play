@@ -1,0 +1,59 @@
+{
+ "game": "smokebreak",
+ "product": "Smoke Break!",
+ "width": 1280,
+ "height": 720,
+ "band": 16,
+ "touch": {
+  "pad": [
+   "KeyW",
+   "KeyA",
+   "KeyS",
+   "KeyD"
+  ],
+  "keys": [
+   {
+    "label": "E",
+    "code": "KeyE"
+   },
+   {
+    "label": "Dash",
+    "code": "ShiftLeft"
+   },
+   {
+    "label": "Pause",
+    "code": "Escape"
+   }
+  ]
+ },
+ "client": {
+  "loader": "Build/ui-client-web-mobile.loader.js",
+  "framework": "Build/ui-client-web-mobile.framework.js",
+  "code": "Build/ui-client-web-mobile.wasm",
+  "data": {
+   "parts": [
+    "Build/ui-client-web-mobile.data.part00",
+    "Build/ui-client-web-mobile.data.part01",
+    "Build/ui-client-web-mobile.data.part02",
+    "Build/ui-client-web-mobile.data.part03",
+    "Build/ui-client-web-mobile.data.part04"
+   ],
+   "size": 211441516,
+   "gzip": true
+  }
+ },
+ "clientBuild": "mobile",
+ "signal": "wss://unity-signaling-server.onrender.com",
+ "ice": [
+  {
+   "urls": [
+    "stun:stun.l.google.com:19302"
+   ]
+  },
+  {
+   "urls": [
+    "stun:stun.cloudflare.com:3478"
+   ]
+  }
+ ]
+}
