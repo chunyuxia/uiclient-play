@@ -455,7 +455,14 @@ async function connectOnce() {
     ui.onopen = () => log("UI channel open");
     ui.onmessage = (e) => onUiMessage(e.data);
   }
-  pc.ontrack = (e) => { $("video").srcObject = e.streams[0] || new MediaStream([e.track]); log("video track"); };
+  pc.ontrack = (e) => {
+    $("video").srcObject = e.streams[0] || new MediaStream([e.track]);
+    // play frames as soon as they can be decoded: on mobile networks the browser otherwise grows its playout
+    // buffer with the network's jitter (hundreds of ms). ?jitterms=N sets another target (ms).
+    const target = params.get("jitterms") !== null ? +params.get("jitterms") : 0;
+    try { if ("jitterBufferTarget" in e.receiver) e.receiver.jitterBufferTarget = target; else e.receiver.playoutDelayHint = target / 1000; } catch (_) { /* not supported */ }
+    log("video track");
+  };
   await pc.setLocalDescription(await pc.createOffer());
   await new Promise((ok) => {
     if (pc.iceGatheringState === "complete") return ok();
@@ -773,6 +780,33 @@ function watchFrames() {
 
 // ------------------------------------------------------------------------------------------ panel
 let pcRef = null, lastBytes = 0, lastT = 0, rtp = {};
+// every 5 s while connected: what the network did (for page-events.jsonl; deltas over the interval)
+let netPrev = null;
+setInterval(async () => {
+  if (!pcRef || !["connected", "completed"].includes(pcRef.iceConnectionState)) return;
+  try {
+    const rep = await pcRef.getStats();
+    let v = null, pair = null, dc = 0;
+    rep.forEach((s) => {
+      if (s.type === "inbound-rtp" && s.kind === "video") v = s;
+      if (s.type === "transport" && s.selectedCandidatePairId) pair = rep.get(s.selectedCandidatePairId);
+      if (s.type === "data-channel" && s.label === "ui") dc = s.bytesReceived || 0;
+    });
+    if (!v) return;
+    const now = { t: performance.now(), bytes: v.bytesReceived, frames: v.framesDecoded, dropped: v.framesDropped || 0, lost: v.packetsLost || 0,
+                  recv: v.packetsReceived || 0, freezes: v.freezeCount || 0, jbDelay: v.jitterBufferDelay || 0, jbCount: v.jitterBufferEmittedCount || 0, dc };
+    if (netPrev) {
+      const dt = (now.t - netPrev.t) / 1000, d = (k) => now[k] - netPrev[k];
+      report("net", { kbps: Math.round(d("bytes") * 8 / dt / 1000), fps: Math.round(d("frames") / dt), dropped: d("dropped"),
+                      lossPct: d("recv") + d("lost") > 0 ? +(100 * d("lost") / (d("recv") + d("lost"))).toFixed(1) : 0,
+                      jitterMs: Math.round((v.jitter || 0) * 1000), bufferMs: d("jbCount") > 0 ? Math.round(1000 * d("jbDelay") / d("jbCount")) : null,
+                      freezes: d("freezes"), rttMs: pair && pair.currentRoundTripTime !== undefined ? Math.round(pair.currentRoundTripTime * 1000) : null,
+                      uiKbps: Math.round(d("dc") * 8 / dt / 1000), uiLagFrames: stats.uiLagFrames, uiQueued: stateQueue.length });
+    }
+    netPrev = now;
+  } catch (_) { /* stats unavailable */ }
+}, 5000);
+
 async function refreshPanel() {
   if (pcRef) {
     const rep = await pcRef.getStats();
