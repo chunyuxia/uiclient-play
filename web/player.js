@@ -108,42 +108,52 @@ async function loadInfo() {
   return m;
 }
 
-// A client file stored in parts (static hosts limit file sizes): downloaded in order and joined into one blob
-// URL for the Unity loader. Progress covers all parts of all files.
+// A client file stored in parts (static hosts limit file sizes): the parts are streamed in order, through the
+// gzip unpacker when packed, into one blob for the Unity loader. Only one part is held at a time (a failed part
+// is fetched again before any of it is passed on), so the page never keeps several copies of the client in
+// memory: phones (iPhone Safari above all) close tabs that use too much. Progress covers all parts of all files.
 const partProgress = { total: 0, done: 0 };
-async function joinedUrl(entry, type) {
-  if (typeof entry === "string") return entry;
-  const chunks = [];
-  for (const part of entry.parts) {
-    // a dropped connection (mobile data, flaky networks) retries the part, up to 5 times
-    for (let attempt = 1; ; attempt++) {
-      const got = [];
-      let n = 0;
-      try {
-        const r = await fetch(info.base + part, { cache: attempt > 1 ? "reload" : "default" });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const reader = r.body.getReader();
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          got.push(value);
-          n += value.length;
-          setStatus("Downloading the game client: " + Math.round(100 * (partProgress.done + n) / Math.max(1, partProgress.total)) + "%");
-        }
-        chunks.push(...got);
-        partProgress.done += n;
-        break;
-      } catch (e) {
-        report("download-retry", { part, attempt, error: String(e && e.message || e).slice(0, 200) });
-        if (attempt >= 5) throw new Error(part + ": " + (e && e.message || e));
-        setStatus("Download interrupted; retrying (" + attempt + ")...");
-        await new Promise((r) => setTimeout(r, 1000 * attempt));
+async function fetchPart(url) {
+  // a dropped connection (mobile data, flaky networks) retries the part, up to 5 times
+  for (let attempt = 1; ; attempt++) {
+    const got = [];
+    let n = 0;
+    try {
+      const r = await fetch(url, { cache: attempt > 1 ? "reload" : "default" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const reader = r.body.getReader();
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        got.push(value);
+        n += value.length;
+        setStatus("Downloading the game client: " + Math.round(100 * (partProgress.done + n) / Math.max(1, partProgress.total)) + "%");
       }
+      partProgress.done += n;
+      return got;
+    } catch (e) {
+      report("download-retry", { part: url.split("/").pop(), attempt, error: String(e && e.message || e).slice(0, 200) });
+      if (attempt >= 5) throw new Error(url.split("/").pop() + ": " + (e && e.message || e));
+      setStatus("Download interrupted; retrying (" + attempt + ")...");
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
     }
   }
-  let blob = new Blob(chunks);
-  if (entry.gzip) blob = await new Response(blob.stream().pipeThrough(new DecompressionStream("gzip"))).blob();
-  return URL.createObjectURL(new Blob([blob], { type }));
+}
+async function joinedUrl(entry, type) {
+  if (typeof entry === "string") return entry;
+  const t0 = performance.now();
+  let i = 0;
+  const source = new ReadableStream({
+    async pull(ctrl) {
+      if (i >= entry.parts.length) { ctrl.close(); return; }
+      for (const chunk of await fetchPart(info.base + entry.parts[i++])) ctrl.enqueue(chunk);
+    },
+  });
+  const stream = entry.gzip ? source.pipeThrough(new DecompressionStream("gzip")) : source;
+  const blob = await new Response(stream, { headers: { "Content-Type": type } }).blob();
+  report("download-done", { file: entry.parts[0].split("/").pop().replace(/\.part\d+$/, ""), mb: Math.round(entry.size / 1048576),
+                            unpackedMB: Math.round(blob.size / 1048576), ms: Math.round(performance.now() - t0) });
+  return URL.createObjectURL(blob);
 }
 
 // ------------------------------------------------------------------------------------------ view toggle
@@ -257,6 +267,7 @@ async function startClient() {
     keyboardListeningElement: c,   // not window: keys are for the game, never for the mirror client
   }, (p) => {
     $("panel").dataset.loading = Math.round(p * 100);
+    if (p >= 0.9 && !startClient.reported90) { startClient.reported90 = true; report("client-90", { ms: Math.round(performance.now() - pageT0) }); }
     if (params.get("mode") !== "replay") setStatus(p < 1 ? "Loading the game client: " + Math.round(p * 100) + "%" : "");
   });
   if (pcRef && pcRef.iceConnectionState !== "connected" && pcRef.iceConnectionState !== "completed") setStatus("Connecting to the game...");
