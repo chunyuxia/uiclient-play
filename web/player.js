@@ -655,14 +655,41 @@ function setStatus(text) {
 let sendInput = () => {};
 let inputChannel = null, inputBound = false;
 const pendingTaps = [];
+// Clock offset (game timing clock - this page's clock), from the tap whose answer came back fastest: there the trips up
+// and down are taken as equal (the usual NTP estimate). Its error is at most half that fastest round trip.
+let clockOffset = null, bestRoundTrip = Infinity;
+function tapAck(m) {
+  const ta = performance.now();
+  if (m.rx !== undefined && m.tx !== undefined) {
+    const rt = (ta - m.ct) - (m.tx - m.rx);
+    if (rt < bestRoundTrip) { bestRoundTrip = rt; clockOffset = ((m.rx - m.ct) + (m.tx - ta)) / 2; }
+  }
+  if (pendingTaps.length < 50) pendingTaps.push({ ct: m.ct, gf: m.gf, rx: m.rx, tx: m.tx, ta, ackMs: Math.round(ta - m.ct) });
+}
+function tapFrameComposed(m) {
+  const p = pendingTaps.find((x) => x.ct === m.ct && x.gf === m.gf);
+  if (p) { p.tc = m.tc; finishTap(p); }
+}
+function finishTap(p) {
+  if (p.shownAt === undefined || (p.rx !== undefined && p.tc === undefined)) return;   // wait for both: frame shown, "fc"
+  pendingTaps.splice(pendingTaps.indexOf(p), 1);
+  // totalMs: press -> its result on screen; ackMs: press -> the game's answer; shownMs: the result frame's arrival -> on
+  // screen (jitter buffer, decoding). Split of totalMs (= upMs + gameMs + downMs): upMs: press -> the game has it;
+  // gameMs: the game has it -> the frame with the result is made (waiting for the frame, rendering); downMs: that frame
+  // made -> on this screen (encoding, sending, network, jitter buffer, decoding)
+  const o = { totalMs: Math.round(p.shownAt - p.ct), ackMs: p.ackMs, shownMs: p.shownMs, rttMs: rtp.rttMs, framesLate: p.framesLate };
+  if (p.tc !== undefined && clockOffset !== null) {
+    Object.assign(o, { upMs: Math.round(p.rx - p.ct - clockOffset), gameMs: Math.round(p.tc - p.rx), downMs: Math.round(p.shownAt - (p.tc - clockOffset)),
+                       ackDownMs: Math.round(p.ta - (p.tx - clockOffset)), clockErrMs: Math.round(bestRoundTrip / 2),
+                       raw: { ct: p.ct, rx: p.rx, tx: p.tx, ta: Math.round(p.ta * 100) / 100, tc: p.tc, shown: Math.round(p.shownAt * 100) / 100 } });
+  }
+  report("tap", o);
+}
 onVideoFrame((f) => {
-  for (let i = pendingTaps.length - 1; i >= 0; i--) {
-    const p = pendingTaps[i];
-    if (f < p.gf) continue;
-    pendingTaps.splice(i, 1);
-    // totalMs: press -> its result on screen; ackMs: press -> the game's answer (input trip + waiting for the frame + answer
-    // trip); shownMs: the result frame's arrival -> on screen (jitter buffer, decoding)
-    report("tap", { totalMs: Math.round(performance.now() - p.ct), ackMs: p.ackMs, shownMs: stats.shownMs, rttMs: rtp.rttMs, framesLate: f - p.gf });
+  for (const p of pendingTaps.slice()) {
+    if (p.shownAt !== undefined || f < p.gf) continue;
+    Object.assign(p, { shownAt: performance.now(), shownMs: stats.shownMs, framesLate: f - p.gf });
+    finishTap(p);
   }
 });
 function setupInput(ch) {
@@ -673,7 +700,8 @@ function setupInput(ch) {
   // on screen closes the loop: tap -> game -> video -> screen, in ms on this page's own clock
   ch.onmessage = (e) => {
     let m; try { m = JSON.parse(e.data); } catch (_) { return; }
-    if (m.t === "ack" && pendingTaps.length < 50) pendingTaps.push({ ct: m.ct, gf: m.gf, ackMs: Math.round(performance.now() - m.ct) });
+    if (m.t === "ack") tapAck(m);
+    else if (m.t === "fc") tapFrameComposed(m);
   };
   if (inputBound) return;
   inputBound = true;
