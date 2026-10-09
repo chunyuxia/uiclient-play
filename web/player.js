@@ -654,10 +654,27 @@ function setStatus(text) {
 // top-left origin. Each event carries the game frame on screen, so the server log pairs input with what was seen.
 let sendInput = () => {};
 let inputChannel = null, inputBound = false;
+const pendingTaps = [];
+onVideoFrame((f) => {
+  for (let i = pendingTaps.length - 1; i >= 0; i--) {
+    const p = pendingTaps[i];
+    if (f < p.gf) continue;
+    pendingTaps.splice(i, 1);
+    // totalMs: press -> its result on screen; ackMs: press -> the game's answer (input trip + waiting for the frame + answer
+    // trip); shownMs: the result frame's arrival -> on screen (jitter buffer, decoding)
+    report("tap", { totalMs: Math.round(performance.now() - p.ct), ackMs: p.ackMs, shownMs: stats.shownMs, rttMs: rtp.rttMs, framesLate: f - p.gf });
+  }
+});
 function setupInput(ch) {
   inputChannel = ch;
   ch.onopen = () => log("input channel open (click the picture to give it keyboard focus)");
   ch.onclose = () => log("input channel closed");
+  // timing: the game answers each press with the frame it took effect in ("ack"); the first frame at least that new
+  // on screen closes the loop: tap -> game -> video -> screen, in ms on this page's own clock
+  ch.onmessage = (e) => {
+    let m; try { m = JSON.parse(e.data); } catch (_) { return; }
+    if (m.t === "ack" && pendingTaps.length < 50) pendingTaps.push({ ct: m.ct, gf: m.gf, ackMs: Math.round(performance.now() - m.ct) });
+  };
   if (inputBound) return;
   inputBound = true;
   const el = $("input");
@@ -919,7 +936,7 @@ function summarize(seconds) {
   };
 }
 
-// The toolkit's step format ({"click":[x,y]}, {"drag":[x1,y1,x2,y2]}, {"key":"ESCAPE","hold":0.1},
+// The toolkit's step format ({"click":[x,y]}, {"tap":[x,y]}, {"drag":[x1,y1,x2,y2]}, {"key":"ESCAPE","hold":0.1},
 // {"keys":["W","D"],"hold":1}, {"wait":s}; 0..1 coordinates, top-left origin) played through the input channel.
 const KEY_CODES = { SPACE: "Space", ENTER: "Enter", RETURN: "Enter", ESCAPE: "Escape", ESC: "Escape", TAB: "Tab", BACKSPACE: "Backspace",
   UP: "ArrowUp", DOWN: "ArrowDown", LEFT: "ArrowLeft", RIGHT: "ArrowRight", SHIFT: "ShiftLeft", CTRL: "ControlLeft", ALT: "AltLeft" };
@@ -938,6 +955,11 @@ async function playSteps(steps) {
     else if (st.click) {
       const [x, y] = st.click;
       sendInput({ t: "move", x, y }); await sleep(0.05);
+      sendInput({ t: "down", b: 0, x, y }); await sleep(0.08);
+      sendInput({ t: "up", b: 0, x, y });
+    } else if (st.tap) {
+      // as a touch screen sends it: press and release, no pointer move before
+      const [x, y] = st.tap;
       sendInput({ t: "down", b: 0, x, y }); await sleep(0.08);
       sendInput({ t: "up", b: 0, x, y });
     } else if (st.drag) {
