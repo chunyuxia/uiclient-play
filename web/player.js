@@ -665,6 +665,9 @@ function setupInput(ch) {
     const c = inputChannel;
     if (!c || c.readyState !== "open") return;
     o.f = stats.lastFrame; o.ct = Math.round(performance.now());
+    // delay breakdown for stream-input.jsonl: the shown frame's arrival -> on screen (ms), the network round trip (ms)
+    if (stats.shownMs !== undefined) o.vd = stats.shownMs;
+    if (rtp.rttMs !== undefined) o.rtt = rtp.rttMs;
     c.send(JSON.stringify(o));
     stats.inputs = (stats.inputs || 0) + 1;
   };
@@ -769,6 +772,7 @@ function watchFrames() {
     stats.tagOk++;
     if (stats.lastFrame >= 0 && f !== stats.lastFrame + 1) stats.frameGaps++;   // the game renders faster than the stream
     stats.lastFrame = lastSeen = f;
+    if (meta && meta.receiveTime && meta.presentationTime) stats.shownMs = Math.round(meta.presentationTime - meta.receiveTime);
     for (const fn of frameListeners) fn(f, meta);
   };
   if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
