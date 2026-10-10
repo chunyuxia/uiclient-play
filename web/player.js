@@ -721,14 +721,49 @@ function setupInput(ch) {
     return { x: Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (e.clientY - r.top) / r.height)) };
   };
   let lastMove = 0;
+  // Two-finger pinch on touch screens = mouse wheel (phones have no wheel; games zoom with it): spreading the fingers
+  // zooms in (wheel away from the user), pinching zooms out, one notch per PINCH_PX of change in finger distance.
+  // A second finger releases the first finger's press, and nothing else is sent until both fingers are up.
+  const touches = new Map(), PINCH_PX = 40;
+  let pinch = null;
+  const fingerGap = () => { const [a, b] = [...touches.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
+  const fingerMid = () => { const [a, b] = [...touches.values()]; return pos({ clientX: (a.x + b.x) / 2, clientY: (a.y + b.y) / 2 }); };
   el.addEventListener("pointerdown", (e) => {
     el.focus();
     try { el.setPointerCapture(e.pointerId); } catch (_) { /* synthetic pointers (automation) cannot be captured */ }
-    send({ t: "down", b: e.button, ...pos(e) });
     e.preventDefault();
+    if (e.pointerType === "touch") {
+      touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (touches.size === 2) {
+        const first = [...touches.keys()].find((id) => id !== e.pointerId), f = touches.get(first);
+        if (!pinch) send({ t: "up", b: 0, ...pos({ clientX: f.x, clientY: f.y }) });
+        pinch = { gap: fingerGap() };
+        return;
+      }
+      if (pinch || touches.size > 2) return;
+    }
+    send({ t: "down", b: e.button, ...pos(e) });
   });
-  el.addEventListener("pointerup", (e) => { send({ t: "up", b: e.button, ...pos(e) }); e.preventDefault(); });
+  const touchEnd = (e) => {
+    if (e.pointerType !== "touch" || !touches.has(e.pointerId)) return false;
+    touches.delete(e.pointerId);
+    if (pinch) { if (touches.size === 0) pinch = null; return true; }
+    return false;
+  };
+  el.addEventListener("pointerup", (e) => { e.preventDefault(); if (touchEnd(e)) return; send({ t: "up", b: e.button, ...pos(e) }); });
+  el.addEventListener("pointercancel", (e) => { if (touchEnd(e)) return; if (e.pointerType === "touch") send({ t: "up", b: 0, ...pos(e) }); });
   el.addEventListener("pointermove", (e) => {
+    if (e.pointerType === "touch" && touches.has(e.pointerId)) touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch) {
+      if (touches.size !== 2) return;
+      const gap = fingerGap();
+      while (Math.abs(gap - pinch.gap) >= PINCH_PX) {
+        const out = gap < pinch.gap;
+        send({ t: "wheel", dy: out ? 1 : -1, ...fingerMid() });
+        pinch.gap += out ? -PINCH_PX : PINCH_PX;
+      }
+      return;
+    }
     const now = performance.now();
     if (now - lastMove < 8 && !e.buttons) return;      // hover moves at most ~120 Hz; drags are never thinned
     lastMove = now;
@@ -964,7 +999,7 @@ function summarize(seconds) {
   };
 }
 
-// The toolkit's step format ({"click":[x,y]}, {"tap":[x,y]}, {"drag":[x1,y1,x2,y2]}, {"key":"ESCAPE","hold":0.1},
+// The toolkit's step format ({"click":[x,y]}, {"tap":[x,y]}, {"wheel":[x,y,n]}, {"drag":[x1,y1,x2,y2]}, {"key":"ESCAPE","hold":0.1},
 // {"keys":["W","D"],"hold":1}, {"wait":s}; 0..1 coordinates, top-left origin) played through the input channel.
 const KEY_CODES = { SPACE: "Space", ENTER: "Enter", RETURN: "Enter", ESCAPE: "Escape", ESC: "Escape", TAB: "Tab", BACKSPACE: "Backspace",
   UP: "ArrowUp", DOWN: "ArrowDown", LEFT: "ArrowLeft", RIGHT: "ArrowRight", SHIFT: "ShiftLeft", CTRL: "ControlLeft", ALT: "AltLeft" };
@@ -990,6 +1025,11 @@ async function playSteps(steps) {
       const [x, y] = st.tap;
       sendInput({ t: "down", b: 0, x, y }); await sleep(0.08);
       sendInput({ t: "up", b: 0, x, y });
+    } else if (st.wheel) {
+      // {"wheel":[x, y, notches]}: positive = towards the user (zoom out in most games), negative = away (zoom in)
+      const [x, y, n] = st.wheel;
+      sendInput({ t: "move", x, y }); await sleep(0.05);
+      for (let i = 0; i < Math.abs(n); i++) { sendInput({ t: "wheel", dy: Math.sign(n), x, y }); await sleep(0.06); }
     } else if (st.drag) {
       const [x1, y1, x2, y2] = st.drag, n = 12;
       sendInput({ t: "down", b: 0, x: x1, y: y1 });
