@@ -1121,7 +1121,98 @@ function heartbeat() {
                            tail: $("log").textContent.trim().split("\n").slice(-3) }) }).catch(() => {}), 10000);
 }
 
+// ------------------------------------------------------------------------------------------ launcher
+// A page opened without ?game= on a paired phone asks the paired machine's host agent (`stream host`, see
+// python/host.py) which games it offers, starts one there and then opens it like a normal phone link. The pairing
+// link (?agent=&akey=&signal=) is kept in this browser; every request is signed with the key.
+const PAIR_KEY = "uiclient-agent";
+function storedPairing() {
+  try { const v = JSON.parse(localStorage.getItem(PAIR_KEY) || "null"); return v && v.agent && v.akey && v.signal ? v : null; }
+  catch (_) { return null; }
+}
+async function launcherWanted() {
+  if (params.get("game")) return false;
+  if (params.get("agent") && params.get("akey") && params.get("signal")) {
+    try { localStorage.setItem(PAIR_KEY, JSON.stringify({ agent: params.get("agent"), akey: params.get("akey"), signal: params.get("signal") })); }
+    catch (_) { /* private mode: paired for this visit only */ }
+    return true;
+  }
+  if (!storedPairing()) return false;
+  try { const r = await fetch("/api/info"); if (r.ok) return false; } catch (_) { /* static hosting */ }
+  return true;
+}
+async function runLauncher() {
+  const pair = storedPairing() || { agent: params.get("agent"), akey: params.get("akey"), signal: params.get("signal") };
+  history.replaceState(null, "", location.pathname);   // the key does not stay in the address bar or history
+  const box = document.createElement("div");
+  box.id = "launcher";
+  box.innerHTML = '<h2>Play on your PC</h2><p id="l-state">Looking for your PC...</p><div id="l-games"></div>' +
+                  '<div id="l-run"></div><p id="l-note"></p><button id="l-forget" class="l-link">Forget this PC</button>';
+  document.body.prepend(box);
+  $("wrap").style.display = "none";
+  const agentTo = "agent-" + pair.agent;
+  let ws = null, want = null, last = null, answered = false;
+  const send = async (type, game) => {
+    const ts = Date.now();
+    const mac = await hmacHex(pair.akey, [type, pageId, ts, game || ""].join("|"));
+    const text = JSON.stringify({ app: APP, v: 1, from: pageId, to: agentTo, type, ts, game: game || undefined, mac });
+    if (ws && ws.readyState === 1) ws.send(text);
+  };
+  const open = (st) => {
+    const q = new URLSearchParams({ game: st.game, code: st.code, key: pair.akey, signal: pair.signal });
+    location.href = location.pathname + "?" + q.toString();
+  };
+  const render = (st) => {
+    last = st;
+    $("l-note").textContent = st.error || "";
+    if (!st.games) return;
+    $("l-state").textContent = st.state === "starting" ? "Starting " + st.game + " on your PC (about half a minute)..." :
+                               st.state === "running" ? st.game + " is running on your PC." : "Choose a game:";
+    const games = $("l-games");
+    games.innerHTML = "";
+    for (const g of st.games) {
+      const b = document.createElement("button");
+      b.textContent = g;
+      b.disabled = st.state === "starting";
+      b.onclick = () => { want = g; $("l-state").textContent = "Asking your PC to start " + g + "..."; send("launch", g); };
+      games.appendChild(b);
+    }
+    const run = $("l-run");
+    run.innerHTML = "";
+    if (st.state === "running") {
+      const join = document.createElement("button"); join.textContent = "Play " + st.game; join.onclick = () => open(st);
+      const stop = document.createElement("button"); stop.textContent = "Stop it"; stop.className = "l-link";
+      stop.onclick = () => { $("l-state").textContent = "Stopping " + st.game + "..."; send("stop"); };
+      run.append(join, stop);
+      if (want === st.game) open(st);   // the game this page asked for is up
+    }
+  };
+  $("l-forget").onclick = () => { try { localStorage.removeItem(PAIR_KEY); } catch (_) { } location.href = location.pathname; };
+  const connect = () => {
+    ws = new WebSocket(pair.signal);
+    ws.onopen = () => send("ahello");
+    ws.onmessage = async (e) => {
+      let m;
+      try { m = JSON.parse(typeof e.data === "string" ? e.data : await e.data.text()); } catch (_) { return; }
+      if (!m || m.app !== APP || m.to !== pageId || m.from !== agentTo || m.type !== "agent") return;
+      answered = true;
+      render(m);
+    };
+    ws.onclose = () => setTimeout(connect, 2000);
+  };
+  connect();
+  // the relay (a sleeping free server) or the PC may take a while; keep asking until the agent answers
+  for (let i = 0; !answered; i++) {
+    await new Promise((r) => setTimeout(r, 3000));
+    if (answered) break;
+    send("ahello");
+    if (i === 20) $("l-state").textContent = "Your PC does not answer: is it on, and is the host agent running (uiclient.py stream host)? Still trying...";
+  }
+  setInterval(() => { if (last && last.state === "starting") send("ahello"); }, 5000);
+}
+
 (async function main() {
+  if (await launcherWanted()) { await runLauncher(); return; }
   heartbeat();
   info = await loadInfo();
   report("page-load", { ua: navigator.userAgent.slice(0, 200), deviceMemoryGB: navigator.deviceMemory,
