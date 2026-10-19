@@ -901,7 +901,8 @@ setInterval(async () => {
     if (netPrev) {
       const dt = (now.t - netPrev.t) / 1000, d = (k) => now[k] - netPrev[k];
       report("net", { kbps: Math.round(d("bytes") * 8 / dt / 1000), fps: Math.round(d("frames") / dt), dropped: d("dropped"),
-                      lossPct: d("recv") + d("lost") > 0 ? +(100 * d("lost") / (d("recv") + d("lost"))).toFixed(1) : 0,
+                      // packetsLost goes down again when late or retransmitted packets arrive: a second's loss is never negative
+                      lossPct: d("recv") + Math.max(0, d("lost")) > 0 ? +(100 * Math.max(0, d("lost")) / (d("recv") + Math.max(0, d("lost")))).toFixed(1) : 0,
                       jitterMs: Math.round((v.jitter || 0) * 1000), bufferMs: d("jbCount") > 0 ? Math.round(1000 * d("jbDelay") / d("jbCount")) : null,
                       freezes: d("freezes"), rttMs: pair && pair.currentRoundTripTime !== undefined ? Math.round(pair.currentRoundTripTime * 1000) : null,
                       uiKbps: Math.round(d("dc") * 8 / dt / 1000), uiLagFrames: stats.uiLagFrames, uiQueued: stateQueue.length });
