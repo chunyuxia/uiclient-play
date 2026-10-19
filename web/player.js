@@ -458,7 +458,21 @@ async function connectWith(pc) {
   if (params.get("ui") !== "0") {
     const ui = pc.createDataChannel("ui", { ordered: true });
     ui.onopen = () => log("UI channel open");
-    ui.onmessage = (e) => onUiMessage(e.data);
+    // compressed states arrive as binary messages (first byte 0, then raw DEFLATE of the UTF-8 text); they are inflated
+    // asynchronously, so every message goes through one promise chain to keep arrival order
+    ui.binaryType = "arraybuffer";
+    let uiChain = Promise.resolve();
+    ui.onmessage = (e) => {
+      const data = e.data;
+      uiChain = uiChain.then(async () => {
+        if (typeof data === "string") { onUiMessage(data); return; }
+        const body = new Blob([new Uint8Array(data, 1)]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+        const text = await new Response(body).text();
+        stats.uiInflatedChars = (stats.uiInflatedChars || 0) + text.length;
+        stats.uiWireBytes = (stats.uiWireBytes || 0) + data.byteLength;
+        onUiMessage(text);
+      }).catch((err) => log("ui message: " + err));
+    };
   }
   pc.ontrack = (e) => {
     $("video").srcObject = e.streams[0] || new MediaStream([e.track]);
@@ -869,7 +883,7 @@ function watchFrames() {
 
 // ------------------------------------------------------------------------------------------ panel
 let pcRef = null, lastBytes = 0, lastT = 0, rtp = {};
-// every 5 s while connected: what the network did (for page-events.jsonl; deltas over the interval)
+// every second while connected: what the network did (for page-events.jsonl; deltas over the interval)
 let netPrev = null;
 setInterval(async () => {
   if (!pcRef || !["connected", "completed"].includes(pcRef.iceConnectionState)) return;
@@ -894,7 +908,7 @@ setInterval(async () => {
     }
     netPrev = now;
   } catch (_) { /* stats unavailable */ }
-}, 5000);
+}, 1000);
 
 async function refreshPanel() {
   if (pcRef) {
