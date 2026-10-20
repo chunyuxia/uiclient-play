@@ -581,26 +581,32 @@ async function relayOffer(sdp) {
 
 // ---- supervision: reconnect after failures and network changes (e.g. cell handovers, Wi-Fi <-> mobile data)
 let videoStarted = false;
+let offlineUntil = 0;   // test drops (?drop=): no connection attempts until then, as with no network at all
 async function startVideo() {
   let delay = 1000;
   for (;;) {
     let pc = null;
+    while (performance.now() < offlineUntil) await new Promise((r) => setTimeout(r, 200));
     try {
       const tc = performance.now();
       pc = await connectOnce();
       pcRef = pc;
-      report("connected", { ms: Math.round(performance.now() - tc), attempt: delay }); 
+      report("connected", { ms: Math.round(performance.now() - tc), attempt: delay });
+      const open = bench.drops && bench.drops.find((d) => d.connectedAt === undefined && d.lostAt !== undefined);
+      if (open) { open.connectedAt = performance.now(); open.applied0 = stats.applied; open.frames0 = stats.videoFrames; }
       stateQueue.length = 0; pushedFrame = -1; parts.clear();   // the new UI channel starts with a keyframe
       if (!videoStarted) { videoStarted = true; watchFrames(); }
       setStatus("");
       const connectedAt = performance.now();
       await new Promise((lost) => {
-        let timer = null;
+        let timer = null, ended = false;
+        const end = (why) => { if (ended) return; ended = true; clearTimeout(timer); report("lost", { why }); lost(); };   // reported once
         const check = () => {
+          if (ended) return;
           const st = pc.iceConnectionState;
-          if (st === "failed" || st === "closed") { report("lost", { why: "ice-" + st }); return lost(); }
+          if (st === "failed" || st === "closed") return end("ice-" + st);
           if (st === "disconnected") {
-            if (!timer) { report("unstable"); timer = setTimeout(() => { report("lost", { why: "disconnected-4s" }); lost(); }, 4000); }
+            if (!timer) { report("unstable"); timer = setTimeout(() => end("disconnected-4s"), 4000); }
             setStatus("Connection unstable...");
           }
           else { clearTimeout(timer); timer = null; if (st === "connected" || st === "completed") setStatus(""); }
@@ -609,7 +615,7 @@ async function startVideo() {
         check();
         // also polled: some ends fire no event (a closed connection, a phone waking from sleep)
         const poll = setInterval(() => { if (pcRef !== pc) clearInterval(poll); else check(); }, 1000);
-        window.addEventListener("online", () => { report("lost", { why: "network-changed" }); setTimeout(lost, 500); }, { once: true });
+        window.addEventListener("online", () => setTimeout(() => end("network-changed"), 500), { once: true });
       });
       if (performance.now() - connectedAt > 30000) delay = 1000;
       log("connection lost; reconnecting");
@@ -1069,12 +1075,35 @@ async function runBench(seconds) {
   stats.tagOk = 0; stats.tagBad = 0;
   bench.chars0 = stats.uiStateChars || 0; bench.keys0 = stats.uiKeyframes || 0;
   bench.on = true; bench.t0 = performance.now();
+  if (params.get("drop")) {
+    bench.drops = params.get("drop").split(",").map((x) => { const [at, len] = x.split(":").map(Number); return { at, for: len }; });
+    for (const d of bench.drops)
+      setTimeout(() => {
+        log("test: network gone for " + d.for + " s");
+        d.lostAt = performance.now(); d.netBackAt = d.lostAt + d.for * 1000;
+        offlineUntil = d.netBackAt;
+        try { pcRef && pcRef.close(); } catch (_) { /* already closed */ }
+      }, d.at * 1000);
+    // after a reconnect: when video frames and UI states arrive again (the new UI channel starts with a keyframe)
+    const watch = setInterval(() => {
+      for (const d of bench.drops) {
+        if (d.connectedAt === undefined) continue;
+        if (d.videoAt === undefined && stats.videoFrames > d.frames0) d.videoAt = performance.now();
+        if (d.uiAt === undefined && stats.applied > d.applied0) d.uiAt = performance.now();
+      }
+      if (!bench.on) clearInterval(watch);
+    }, 50);
+  }
   await sampleRtp();
   const timer = setInterval(sampleRtp, 1000);
   await new Promise((r) => setTimeout(r, seconds * 1000));
   bench.on = false; clearInterval(timer);
   await sampleRtp();
   const summary = summarize(seconds);
+  if (bench.drops) summary.drops = bench.drops.map((d) => ({ at: d.at, offlineS: d.for,
+    reconnectMs: d.connectedAt !== undefined ? Math.round(d.connectedAt - d.netBackAt) : null,
+    videoBackMs: d.videoAt !== undefined ? Math.round(d.videoAt - d.netBackAt) : null,
+    uiBackMs: d.uiAt !== undefined ? Math.round(d.uiAt - d.netBackAt) : null }));
   log("benchmark: " + JSON.stringify(summary));
   await fetch("/api/report", { method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ summary, frames: bench.frames, applied: bench.applied, rtp: bench.rtp, params: location.search,
