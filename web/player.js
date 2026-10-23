@@ -172,6 +172,7 @@ const VIEW_NOTES = {
 let blackFrame = null;
 function videoForClient() {
   const v = $("video");
+  if (view !== "ui" && exactPairing) return heldFrame || blackFor(v);   // the frame that goes with the applied UI
   if (view !== "ui" || !v.videoWidth) return v;
   if (!blackFrame || blackFrame.width !== v.videoWidth || blackFrame.height !== v.videoHeight) {
     blackFrame = document.createElement("canvas");
@@ -265,7 +266,7 @@ async function startClient() {
     dataUrl: files.data, frameworkUrl: files.framework, codeUrl: files.code,
     companyName: "uiclient", productName: info.product + " UI client", productVersion: "1",
     devicePixelRatio: params.get("legacysize") === "1" ? 1 : unityPixelRatio, matchWebGLToCanvasSize: params.get("legacysize") !== "1",
-    webglContextAttributes: { alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: params.get("capture") === "1" || params.get("remote") === "1" },
+    webglContextAttributes: { alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: params.get("capture") === "1" || params.get("remote") === "1" || !!params.get("refs") },
     keyboardListeningElement: c,   // not window: keys are for the game, never for the mirror client
   }, (p) => {
     $("panel").dataset.loading = Math.round(p * 100);
@@ -431,8 +432,31 @@ function onUiMessage(text) {
   stateQueue.push({ f, text, key });
 }
 
-onVideoFrame((f) => {
-  if (syncMode !== "lockstep" || !stateQueue.length) return;
+// Exact pairing (current game copies, ?sync=lockstep): each video frame's tag says how many frames back its UI state
+// is. The frame is used only once that state has arrived: its UI states are pushed and the frame is copied into
+// heldFrame, which is what the client draws (the <video> element runs on regardless). A frame whose state has not
+// arrived is skipped, so the screen always shows a video frame with exactly the UI the game showed with it.
+let heldFrame = null, exactPairing = false;
+function holdFrame(v) {
+  if (!heldFrame) {
+    heldFrame = document.createElement("canvas");
+    Object.defineProperties(heldFrame, { videoWidth: { get: () => heldFrame.width }, videoHeight: { get: () => heldFrame.height }, readyState: { value: 4 } });
+    heldFrame.ctx = heldFrame.getContext("2d");
+  }
+  if (heldFrame.width !== v.videoWidth || heldFrame.height !== v.videoHeight) { heldFrame.width = v.videoWidth; heldFrame.height = v.videoHeight; }
+  heldFrame.ctx.drawImage(v, 0, 0);
+}
+let pairingPaused = false;   // a paired reference capture is in progress (bench only): the shown picture stays as it is
+onVideoFrame((f, meta, d) => {
+  if (syncMode !== "lockstep" || params.get("ui") === "0" || pairingPaused) return;   // no UI channel (pixel streaming): nothing to pair
+  if (d !== null && d !== undefined) {
+    exactPairing = true;
+    const need = d < 63 ? f - d : Infinity;
+    if (!(newestFrame >= need)) { stats.uiWaitSkipped = (stats.uiWaitSkipped || 0) + 1; return; }   // its UI state is not here yet
+    stats.uiExactFrames = (stats.uiExactFrames || 0) + 1;
+  }
+  if (exactPairing) { holdFrame($("video")); heldFrame.frame = f; }
+  if (!stateQueue.length) return;
   let n = 0;
   while (n < stateQueue.length && stateQueue[n].f <= f) n++;
   if (!n) { if (pushedFrame < 0) stats.uiAhead = (stats.uiAhead || 0) + 1; return; }   // no state for this frame yet
@@ -452,6 +476,25 @@ async function connectOnce() {
   catch (e) { try { pc.close(); } catch (_) { /* already closed */ } throw e; }   // browsers limit open connections
 }
 
+// One DEFLATE stream for all messages of a channel: each message is the stream's output for one text, flushed, so
+// reading exactly the text's length returns it without waiting for later messages.
+function uiStream() {
+  const ds = new DecompressionStream("deflate-raw");
+  const writer = ds.writable.getWriter(), reader = ds.readable.getReader(), dec = new TextDecoder();
+  let buf = new Uint8Array(0);
+  return async (bytes, len) => {
+    writer.write(bytes);
+    while (buf.length < len) {
+      const { value, done } = await reader.read();
+      if (done) throw new Error("UI stream ended");
+      const nb = new Uint8Array(buf.length + value.length); nb.set(buf); nb.set(value, buf.length); buf = nb;
+    }
+    const out = buf.subarray(0, len);
+    buf = buf.slice(len);
+    return dec.decode(out);
+  };
+}
+
 async function connectWith(pc) {
   pc.addTransceiver("video", { direction: "recvonly" });
   if (params.get("input") !== "0") setupInput(pc.createDataChannel("input", { ordered: true }));
@@ -462,14 +505,34 @@ async function connectWith(pc) {
     // asynchronously, so every message goes through one promise chain to keep arrival order
     ui.binaryType = "arraybuffer";
     let uiChain = Promise.resolve();
+    const inflate = uiStream();   // this channel's DEFLATE stream (the game starts a new one per connection)
+    const partsOf = new Map();
     ui.onmessage = (e) => {
       const data = e.data;
       uiChain = uiChain.then(async () => {
         if (typeof data === "string") { onUiMessage(data); return; }
-        const body = new Blob([new Uint8Array(data, 1)]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
-        const text = await new Response(body).text();
+        let b = new Uint8Array(data);
+        stats.uiWireBytes = (stats.uiWireBytes || 0) + b.length;
+        if (b[0] === 2) {   // part of a large message: id, index, count (2 bytes each), then the slice
+          const id = (b[1] << 8) | b[2], i = (b[3] << 8) | b[4], n = (b[5] << 8) | b[6];
+          let p = partsOf.get(id); if (!p) partsOf.set(id, (p = []));
+          p[i] = b.subarray(7);
+          if (p.filter((x) => x).length < n) return;
+          partsOf.delete(id);
+          const all = new Uint8Array(p.reduce((a, x) => a + x.length, 0));
+          let at = 0; for (const x of p) { all.set(x, at); at += x.length; }
+          b = all;
+        }
+        let text;
+        if (b[0] === 1) {   // byte 1, the text's length (LEB128), the stream's bytes for it
+          let len = 0, shift = 0, i = 1;
+          for (;; i++) { len += (b[i] & 0x7F) * 2 ** shift; shift += 7; if (!(b[i] & 0x80)) break; }
+          text = await inflate(b.subarray(i + 1), len);
+        } else {            // byte 0: one message compressed on its own (earlier game copies)
+          const body = new Blob([b.subarray(1)]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+          text = await new Response(body).text();
+        }
         stats.uiInflatedChars = (stats.uiInflatedChars || 0) + text.length;
-        stats.uiWireBytes = (stats.uiWireBytes || 0) + data.byteLength;
         onUiMessage(text);
       }).catch((err) => log("ui message: " + err));
     };
@@ -594,7 +657,7 @@ async function startVideo() {
       report("connected", { ms: Math.round(performance.now() - tc), attempt: delay });
       const open = bench.drops && bench.drops.find((d) => d.connectedAt === undefined && d.lostAt !== undefined);
       if (open) { open.connectedAt = performance.now(); open.applied0 = stats.applied; open.frames0 = stats.videoFrames; }
-      stateQueue.length = 0; pushedFrame = -1; parts.clear();   // the new UI channel starts with a keyframe
+      stateQueue.length = 0; pushedFrame = -1; newestFrame = -1; parts.clear();   // the new UI channel starts with a keyframe
       if (!videoStarted) { videoStarted = true; watchFrames(); }
       setStatus("");
       const connectedAt = performance.now();
@@ -856,8 +919,11 @@ function readTag(video) {
   if (bit(0) !== 1 || bit(1) !== 0) return null;
   let f = 0; for (let i = 0; i < 32; i++) f = (f * 2) + bit(2 + i);
   let crc = 0; for (let i = 0; i < 8; i++) crc = (crc << 1) | bit(34 + i);
+  let d = 0; for (let i = 0; i < 6; i++) d = (d << 1) | bit(42 + i);
   const bytes = [(f >>> 24) & 255, (f >>> 16) & 255, (f >>> 8) & 255, f & 255];
-  return crc8(bytes) === crc ? f : null;
+  // current tags: blocks 42-47 = how many frames back this frame's UI state is (63: unknown), inside the CRC
+  if (crc8(bytes.concat([d])) === crc) return { f, d };
+  return crc8(bytes) === crc ? { f, d: null } : null;   // an earlier game copy: frame number only
 }
 
 
@@ -865,7 +931,8 @@ function watchFrames() {
   const v = $("video");
   let viaVideo = false, lastSeen = -1;
   const handle = (meta) => {
-    const f = readTag(v);
+    const tag = readTag(v);
+    const f = tag ? tag.f : null;
     if (f !== null && f === lastSeen) return;          // rAF fallback: the same video frame is still shown
     stats.videoFrames++;
     if (f === null) { stats.tagBad++; return; }
@@ -873,7 +940,7 @@ function watchFrames() {
     if (stats.lastFrame >= 0 && f !== stats.lastFrame + 1) stats.frameGaps++;   // the game renders faster than the stream
     stats.lastFrame = lastSeen = f;
     if (meta && meta.receiveTime && meta.presentationTime) stats.shownMs = Math.round(meta.presentationTime - meta.receiveTime);
-    for (const fn of frameListeners) fn(f, meta);
+    for (const fn of frameListeners) fn(f, meta, tag.d);
   };
   if ("requestVideoFrameCallback" in HTMLVideoElement.prototype) {
     const onFrame = (now, meta) => { viaVideo = true; handle(meta); v.requestVideoFrameCallback(onFrame); };
@@ -911,8 +978,11 @@ setInterval(async () => {
                       lossPct: d("recv") + Math.max(0, d("lost")) > 0 ? +(100 * Math.max(0, d("lost")) / (d("recv") + Math.max(0, d("lost")))).toFixed(1) : 0,
                       jitterMs: Math.round((v.jitter || 0) * 1000), bufferMs: d("jbCount") > 0 ? Math.round(1000 * d("jbDelay") / d("jbCount")) : null,
                       freezes: d("freezes"), rttMs: pair && pair.currentRoundTripTime !== undefined ? Math.round(pair.currentRoundTripTime * 1000) : null,
-                      uiKbps: Math.round(d("dc") * 8 / dt / 1000), uiLagFrames: stats.uiLagFrames, uiQueued: stateQueue.length });
+                      uiKbps: Math.round(d("dc") * 8 / dt / 1000), uiLagFrames: stats.uiLagFrames, uiQueued: stateQueue.length,
+                      // exact pairing: frames shown with their own UI state / skipped while their state was on its way
+                      uiExact: (stats.uiExactFrames || 0) - (netPrev.uiExact || 0), uiWaitSkipped: (stats.uiWaitSkipped || 0) - (netPrev.uiWait || 0) });
     }
+    now.uiExact = stats.uiExactFrames || 0; now.uiWait = stats.uiWaitSkipped || 0;
     netPrev = now;
   } catch (_) { /* stats unavailable */ }
 }, 1000);
@@ -1004,6 +1074,7 @@ function summarize(seconds) {
     seconds, videoFramesShown: fr.length, shownFps: fr.length / seconds,
     tagDecodeRate: stats.tagOk + stats.tagBad ? stats.tagOk / (stats.tagOk + stats.tagBad) : null,
     gameFrameSteps: { one: steps.filter((x) => x === 1).length, two: steps.filter((x) => x === 2).length, more: steps.filter((x) => x > 2).length },
+    exactPairing: { framesShown: (stats.uiExactFrames || 0) - (bench.exact0 || 0), framesSkippedWaitingForUi: (stats.uiWaitSkipped || 0) - (bench.wait0 || 0) },
     lockstep: { framesWithUi: lags.length, exactUiFrame: lags.filter((x) => x === 0).length, lagMax: lags.length ? Math.max(...lags) : null,
                 lagP95: quantile(lags, 0.95) },
     samePaint: { checked: timed.length, appliedBeforeDisplay: samePaint },
@@ -1018,6 +1089,13 @@ function summarize(seconds) {
     webgl: webglRenderer(),
     userAgent: navigator.userAgent,
   };
+}
+
+function blackFor(v) {
+  const c = document.createElement("canvas");
+  c.width = v.videoWidth || 2; c.height = v.videoHeight || 2;
+  Object.defineProperties(c, { videoWidth: { get: () => c.width }, videoHeight: { get: () => c.height }, readyState: { value: 4 } });
+  return c;
 }
 
 // The toolkit's step format ({"click":[x,y]}, {"tap":[x,y]}, {"wheel":[x,y,n]}, {"drag":[x1,y1,x2,y2]}, {"key":"ESCAPE","hold":0.1},
@@ -1074,6 +1152,7 @@ async function runBench(seconds) {
   if (script.steps && script.steps.length) { log("benchmark: playing " + script.steps.length + " input steps"); playSteps(script.steps); }
   stats.tagOk = 0; stats.tagBad = 0;
   bench.chars0 = stats.uiStateChars || 0; bench.keys0 = stats.uiKeyframes || 0;
+  bench.exact0 = stats.uiExactFrames || 0; bench.wait0 = stats.uiWaitSkipped || 0;
   bench.on = true; bench.t0 = performance.now();
   if (params.get("drop")) {
     bench.drops = params.get("drop").split(",").map((x) => { const [at, len] = x.split(":").map(Number); return { at, for: len }; });
@@ -1240,6 +1319,56 @@ async function runLauncher() {
   setInterval(() => { if (last && last.state === "starting") send("ahello"); }, 5000);
 }
 
+// ?refs=N (stream bench --refs): every N frames the received frame goes to the server, to compare with the frame the
+// game sent (stream_quality.py): split mode the world frame shown with its UI, pixel mode (?ui=0) the whole frame;
+// every 10th time also the picture the viewer saw (for figures).
+function sendRefs(n) {
+  const c = document.createElement("canvas"), x = c.getContext("2d");
+  let sent = 0;
+  const post = (kind, f, src, w, h) => {
+    c.width = w; c.height = h;
+    x.drawImage(src, 0, 0, w, h, 0, 0, w, h);
+    c.toBlob((b) => b && fetch("/api/frame?f=" + f + "&kind=" + kind, { method: "POST", body: b }).catch(() => {}), "image/png");
+  };
+  const frames2 = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  const snap = (kind, f) => {
+    const s = composite(), c2 = document.createElement("canvas"); c2.width = s.width; c2.height = s.height;
+    c2.getContext("2d").drawImage(s, 0, 0);
+    return new Promise((r) => c2.toBlob((b) => { if (b) fetch("/api/frame?f=" + f + "&kind=" + kind, { method: "POST", body: b }).catch(() => {}); r(); }, "image/png"));
+  };
+  onVideoFrame(async (f) => {
+    if (f % n !== 0 || !bench.on || pairingPaused) return;
+    const v = $("video");
+    if (params.get("ui") === "0") {
+      post("full", f, v, v.videoWidth, v.videoHeight - BAND);
+      if (sent++ % 10 === 0) { await frames2(); await snap("shown", f); }   // figures
+      return;
+    }
+    if (!heldFrame || heldFrame.frame !== f) return;
+    post("world", f, heldFrame, heldFrame.width, heldFrame.height - BAND);
+    // split: the picture as shown (received world under the client's UI), then the same UI state over the game's own
+    // lossless world frame: the difference is only the world video's quality
+    pairingPaused = true;
+    try {
+      await frames2();
+      await snap("shown", f);
+      let img = null;
+      // the game writes the frame in the background (GPU read-back, PNG): wait for it, up to 6 s
+      for (let i = 0; i < 120 && !img; i++) {
+        const r = await fetch("/api/ref?f=" + f, { cache: "no-store" }).catch(() => null);
+        if (r && r.ok) img = await createImageBitmap(await r.blob());
+        else await new Promise((res) => setTimeout(res, 50));
+      }
+      if (!img) log("reference frame " + f + " not available");
+      if (img) {
+        heldFrame.ctx.drawImage(img, 0, 0, img.width, img.height, 0, 0, img.width, img.height);   // the tag band rows stay
+        await frames2();
+        await snap("shownref", f);
+      }
+    } finally { pairingPaused = false; }
+  });
+}
+
 (async function main() {
   if (await launcherWanted()) { await runLauncher(); return; }
   heartbeat();
@@ -1278,6 +1407,7 @@ async function runLauncher() {
   startVideo();
   if (ui) await startClient();
   while (!pcRef) await new Promise((r) => setTimeout(r, 200));   // benchmarks and remote play need the stream
+  if (params.get("refs")) sendRefs(+params.get("refs"));
   if (params.get("bench")) await runBench(+params.get("bench"));
   if (params.get("remote") === "1") { phase = "remote"; remotePlay(); }
 })().catch((e) => log("error: " + (e && e.stack || e)));

@@ -12,7 +12,7 @@
    "parts": [
     "Build/ui-client-web-mobile.wasm.part00"
    ],
-   "size": 12533786,
+   "size": 12558416,
    "gzip": true
   },
   "data": {
@@ -21,7 +21,7 @@
     "Build/ui-client-web-mobile.data.part01",
     "Build/ui-client-web-mobile.data.part02"
    ],
-   "size": 119232440,
+   "size": 119233794,
    "gzip": true
   }
  },
@@ -39,5 +39,5 @@
    ]
   }
  ],
- "version": "6f1b408cd5"
+ "version": "b6dbe1402f"
 }
